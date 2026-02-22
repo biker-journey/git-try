@@ -1,0 +1,238 @@
+services:
+  redis-master:
+    image: redis:8.4.0-alpine3.22
+    container_name: redis-master
+    healthcheck:
+      test: ["CMD","redis-cli","-a", "${REDIS_PASSWORD}","ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - redis_data:/data
+      - ./master.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "6380:6379"
+    command: ["redis-server","/usr/local/etc/redis/redis.conf"]
+    networks:
+      - social-network
+
+  redis-replica-1:
+    image: redis:8.4.0-alpine3.22
+    container_name: redis-replica-1
+    healthcheck:
+      test: ["CMD","redis-cli","-a", "${REDIS_PASSWORD}","ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 2s
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ./replica.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - "6381:6379"
+    command: ["redis-server","/usr/local/etc/redis/redis.conf"]
+    networks:
+      - social-network
+  
+  sentinel-1: &sentinel
+    image: redis:8.4.0-alpine3.22
+    container_name: sentinel-1
+    healthcheck:
+      test: ["CMD","redis-cli","-a", "${REDIS_PASSWORD}","ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 2s
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    ports:
+      - "26379:26379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ./sentinel_conf:/usr/local/etc/redis/
+    command: ["redis-server","/usr/local/etc/redis/sentinel1.conf","--sentinel"]
+    networks:
+      - social-network
+
+  sentinel-2:
+    <<: *sentinel
+    container_name: sentinel-2
+    ports:
+      - "26380:26379"
+    volumes:
+      - ./sentinel_conf:/usr/local/etc/redis/
+    command: ["redis-server","/usr/local/etc/redis/sentinel2.conf","--sentinel"]
+  
+  sentinel-3:
+    <<: *sentinel
+    container_name: sentinel-3
+    ports:
+      - "26381:26379"
+    volumes:
+      - ./sentinel_conf:/usr/local/etc/redis/
+    command: ["redis-server","/usr/local/etc/redis/sentinel3.conf","--sentinel"]
+
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    container_name: my-rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    networks:
+      - social-network
+
+  social-db:
+    image: postgres:18-alpine3.22
+    container_name: social-db
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 2s
+    volumes:
+      - social_pg_data:/var/lib/postgresql/18/docker
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: social
+    ports:
+      - "5433:5432"
+    networks:
+      - social-network
+
+  order-db:
+    image: postgres:18-alpine3.22
+    container_name: order-db
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 2s
+    volumes:
+      - order_pg_data:/var/lib/postgresql/18/docker
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: order
+    ports:
+      - "5434:5432"
+    networks:
+      - social-network
+
+  inventory-db:
+    image: postgres:18-alpine3.22
+    container_name: inventory-db
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 2s
+    volumes:
+      - inventory_pg_data:/var/lib/postgresql/18/docker
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: inventory
+    ports:
+      - "5435:5432"
+    networks:
+      - social-network
+  
+
+
+  social-app:
+    build: ./internal/services/social-service
+    container_name: social-app
+    depends_on:
+      social-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@social-db:5432/social?sslmode=disable"
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME}
+      REDIS_SENTINELS: "sentinel-1:26379,sentinel-2:26379,sentinel-3:26379"
+      REDIS_URL:    "redis-master:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      SERVER_PORT:  "8080"
+      JWT_SECRET:   "myFirstTry"
+    ports:
+      - "8080:8080"
+      - "6060:6060"
+    networks:
+      - social-network
+
+  order-app:
+    build: ./internal/services/order-service
+    container_name: order-app
+    depends_on:
+      order-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@order-db:5432/order?sslmode=disable"
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+    ports:
+      - "8081:8081"
+    networks:
+      - social-network
+
+
+  inventory-app:
+    build: ./internal/services/inventory-service
+    container_name: inventory-app
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis-master:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@inventory-db:5432/inventory?sslmode=disable"
+      RABBITMQ_URL: "amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/"
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME}
+      REDIS_SENTINELS: "sentinel-1:26379,sentinel-2:26379,sentinel-3:26379"
+      REDIS_URL:    "redis-master:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "8082:8082"
+    networks:
+      - social-network
+
+volumes:
+  social_pg_data:
+  order_pg_data:
+  inventory_pg_data:
+  redis_data:
+  rabbitmq_data:
+
+networks:
+  social-network:
+    driver: bridge
